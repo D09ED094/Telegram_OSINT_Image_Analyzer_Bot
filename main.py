@@ -3,12 +3,25 @@ from PIL import Image, ExifTags
 import os
 import time
 import hashlib # Для хеширования файлов (OSINT)
+import google.generativeai as genai # Библиотека Google AI
 
-# Вставь сюда токен, полученный от @BotFather
-API_TOKEN = 'ТУТ_ТВОЙ_ТОКЕН'
+# ================= КОНФИГУРАЦИЯ =================
+# Вставь сюда токен от BotFather
+API_TOKEN = 'ТУТ_ТВОЙ_ТОКЕН_TELEGRAM'
 
-# Инициализация бота
+# Вставь сюда API ключ от Google (https://aistudio.google.com/)
+GOOGLE_API_KEY = 'ТУТ_ТВОЙ_API_KEY_GOOGLE'
+# ================================================
+
+# Инициализация бота и AI
 bot = telebot.TeleBot(API_TOKEN)
+
+# Настройка Google AI, если ключ указан
+if GOOGLE_API_KEY != 'ТУТ_ТВОЙ_API_KEY_GOOGLE':
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel('gemini-2.5-flash')
+else:
+    model = None
 
 def get_file_hashes(file_path):
     """Считает MD5 и SHA256 хеши файла (цифровые отпечатки)."""
@@ -16,7 +29,6 @@ def get_file_hashes(file_path):
     sha256_hash = hashlib.sha256()
     
     with open(file_path, "rb") as f:
-        # Читаем файл кусками, чтобы не забить память
         for byte_block in iter(lambda: f.read(4096), b""):
             md5_hash.update(byte_block)
             sha256_hash.update(byte_block)
@@ -24,7 +36,7 @@ def get_file_hashes(file_path):
     return md5_hash.hexdigest(), sha256_hash.hexdigest()
 
 def convert_to_degrees(value):
-    """Вспомогательная функция для перевода координат из (градусы, минуты, секунды) в десятичные."""
+    """Вспомогательная функция для перевода координат."""
     d = float(value[0])
     m = float(value[1])
     s = float(value[2])
@@ -36,8 +48,6 @@ def get_gps_details(exif):
         return None
 
     gps_info = {}
-    
-    # Ищем тег GPSInfo (ID 34853)
     for tag, value in exif.items():
         decoded = ExifTags.TAGS.get(tag, tag)
         if decoded == "GPSInfo":
@@ -47,18 +57,15 @@ def get_gps_details(exif):
     if not gps_info:
         return None
 
-    # GPS теги тоже имеют свои ID, декодируем их
     gps_decoded = {}
     for t in gps_info:
         sub_decoded = ExifTags.GPSTAGS.get(t, t)
         gps_decoded[sub_decoded] = gps_info[t]
 
-    # Пытаемся получить широту и долготу
     try:
         lat = convert_to_degrees(gps_decoded['GPSLatitude'])
         lon = convert_to_degrees(gps_decoded['GPSLongitude'])
         
-        # Учитываем полушария (S - южное, W - западное -> отрицательные значения)
         if gps_decoded.get('GPSLatitudeRef') == 'S':
             lat = -lat
         if gps_decoded.get('GPSLongitudeRef') == 'W':
@@ -68,11 +75,40 @@ def get_gps_details(exif):
     except Exception:
         return None
 
+def get_ai_analysis(image_path):
+    """Отправляет фото в Google Gemini для OSINT анализа."""
+    if not model:
+        return "⚠️ Google API Key не настроен. AI анализ пропущен."
+    
+    try:
+        with Image.open(image_path) as img:
+            prompt = (
+                "Ты эксперт по OSINT (Open Source Intelligence). Проанализируй это изображение максимально подробно. "
+                "1. Опиши местоположение (страна, город, тип местности) по визуальным признакам. "
+                "2. Укажи предполагаемое время суток и время года. "
+                "3. Найди и перепиши любой видимый текст (вывески, номера авто, документы). "
+                "4. Опиши уникальные детали: оборудование, одежду людей, архитектуру."
+            )
+            response = model.generate_content([prompt, img])
+            return response.text
+    except Exception as e:
+        return f"Ошибка AI анализа: {e}"
+
+def clean_metadata(input_path, output_path):
+    """Создает копию изображения без метаданных."""
+    with Image.open(input_path) as img:
+        # Мы создаем новый объект изображения, копируя только пиксели,
+        # но не копируя exif словарь.
+        data = list(img.getdata())
+        image_without_exif = Image.new(img.mode, img.size)
+        image_without_exif.putdata(data)
+        image_without_exif.save(output_path)
+
 def get_exif_data(image_path):
-    """Основная функция анализа: хеши, GPS, теги."""
+    """Основная функция анализа: хеши, GPS, теги, AI."""
     report = []
     
-    # 1. Считаем хеши (важно для OSINT)
+    # 1. Хеши
     md5, sha256 = get_file_hashes(image_path)
     report.append(f"🔍 <b>OSINT File Analysis</b>")
     report.append(f"<b>MD5:</b> <code>{md5}</code>")
@@ -83,7 +119,7 @@ def get_exif_data(image_path):
         with Image.open(image_path) as image: 
             exif_data = image._getexif()
             
-            # 2. Пытаемся достать GPS
+            # 2. GPS
             if exif_data:
                 gps_link = get_gps_details(exif_data)
                 if gps_link:
@@ -95,23 +131,15 @@ def get_exif_data(image_path):
             
             report.append("-" * 20)
 
-            # 3. Вывод остальных тегов
+            # 3. Остальные теги
             if exif_data:
                 for tag, value in exif_data.items():
                     tag_name = ExifTags.TAGS.get(tag, tag)
-                    
-                    # Игнорируем сам блок GPSInfo в общем списке, так как он огромен и нечитаем
-                    if tag_name == "GPSInfo":
-                        continue
-                    
-                    # Сокращаем бинарные данные
+                    if tag_name == "GPSInfo": continue
                     if isinstance(value, bytes) and len(value) > 50:
                         value = f"(Binary data: {len(value)} bytes)"
-                    
-                    # Преобразуем сложные структуры
                     if isinstance(value, tuple) or isinstance(value, list):
                          value = str(value)
-
                     report.append(f"<b>{tag_name}:</b> {value}")
         
         return "\n".join(report)
@@ -122,57 +150,89 @@ def get_exif_data(image_path):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, 
-                 "🕵️‍♂️ <b>OSINT Metadata Bot</b>\n\n"
-                 "Я извлекаю:\n"
-                 "- 📍 GPS координаты (ссылка на карты)\n"
-                 "- 🔑 Хеши MD5/SHA256 (для проверки на VirusTotal)\n"
-                 "- 📷 Модель камеры и настройки\n\n"
-                 "❗ Отправляй фото <b>КАК ФАЙЛ</b> (без сжатия).",
+                 "🕵️‍♂️ <b>OSINT Bot v2.1</b>\n\n"
+                 "Функции:\n"
+                 "1. 📍 Извлечение GPS и EXIF (Сообщением)\n"
+                 "2. 🤖 AI Анализ содержимого (Файлом .txt)\n"
+                 "3. 🧼 Очистка фото от метаданных\n\n"
+                 "Отправь фото как <b>Файл (Document)</b>.",
                  parse_mode='HTML')
 
-# Обработчик документов (файлов)
 @bot.message_handler(content_types=['document'])
 def handle_docs(message):
     src = ""
+    files_to_cleanup = [] # Список файлов для удаления в конце
     status_msg = None
+    
     try:
         if 'image' not in message.document.mime_type:
-            bot.reply_to(message, "Это не изображение. Жду файл (jpg/png/tiff).")
+            bot.reply_to(message, "Это не изображение. Жду файл (jpg/png).")
             return
 
-        status_msg = bot.reply_to(message, "🕵️‍♂️ Анализирую цифровой след...")
+        status_msg = bot.reply_to(message, "🕵️‍♂️ Анализирую метаданные, запускаю AI и очищаю файл...")
         
+        # Скачивание
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-
         src = message.document.file_name
         with open(src, 'wb') as new_file:
             new_file.write(downloaded_file)
+        files_to_cleanup.append(src)
 
-        report = get_exif_data(src)
+        # ---------------------------------------------------------
+        # 1. ТЕХНИЧЕСКИЙ ОТЧЕТ (EXIF + Hashes)
+        # ---------------------------------------------------------
+        tech_report = get_exif_data(src)
         
-        # Если отчет слишком большой
-        if len(report) > 4000:
-            txt_file_path = f"report_{src}.txt"
-            with open(txt_file_path, "w", encoding="utf-8") as f:
-                f.write(report.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", "").replace("<a href='", "").replace("'>Открыть на карте</a>", ""))
+        # Отправляем тех. отчет сообщением (или файлом, если огромный)
+        if len(tech_report) > 4000:
+            tech_filename = f"metadata_{src}.txt"
+            with open(tech_filename, "w", encoding="utf-8") as f:
+                # Очищаем от HTML тегов для txt файла
+                clean_text = tech_report.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", "").replace("<a href='", "").replace("'>Открыть на карте</a>", "")
+                f.write(clean_text)
             
-            with open(txt_file_path, "rb") as f:
-                bot.send_document(message.chat.id, f, caption="⚠️ Данных слишком много. Полный отчет в файле.")
-            os.remove(txt_file_path)
+            with open(tech_filename, "rb") as f:
+                bot.send_document(message.chat.id, f, caption="📂 Технические метаданные (слишком большие для сообщения)")
+            files_to_cleanup.append(tech_filename)
         else:
-            bot.reply_to(message, report, parse_mode='HTML', disable_web_page_preview=False)
-            
+            bot.reply_to(message, tech_report, parse_mode='HTML', disable_web_page_preview=False)
+
+        # ---------------------------------------------------------
+        # 2. AI АНАЛИЗ (Всегда файлом)
+        # ---------------------------------------------------------
+        ai_result = get_ai_analysis(src)
+        ai_filename = f"ai_analysis_{src}.txt"
+        
+        with open(ai_filename, "w", encoding="utf-8") as f:
+             f.write(f"🤖 AI ANALYSIS REPORT (GEMINI)\n{'='*30}\n\n{ai_result}")
+        
+        with open(ai_filename, "rb") as f:
+            bot.send_document(message.chat.id, f, caption="🤖 <b>AI Анализ изображения</b> (Gemini)", parse_mode='HTML')
+        files_to_cleanup.append(ai_filename)
+
+        # ---------------------------------------------------------
+        # 3. ЧИСТОЕ ФОТО
+        # ---------------------------------------------------------
+        clean_filename = f"clean_{src}"
+        clean_metadata(src, clean_filename)
+        files_to_cleanup.append(clean_filename)
+        
+        with open(clean_filename, "rb") as clean_file:
+            bot.send_document(message.chat.id, clean_file, caption="🧼 <b>Чистое фото</b> (Без метаданных)")
+
     except Exception as e:
         bot.reply_to(message, f"Ошибка: {e}")
         
     finally:
-        if src and os.path.exists(src):
-            try:
-                time.sleep(0.5) 
-                os.remove(src)
-            except Exception as remove_e:
-                print(f"Error removing {src}: {remove_e}")
+        # Удаление всех временных файлов
+        for f_path in files_to_cleanup:
+            if f_path and os.path.exists(f_path):
+                try:
+                    time.sleep(0.5) 
+                    os.remove(f_path)
+                except Exception:
+                    pass
                 
         if status_msg:
             try:
@@ -182,10 +242,6 @@ def handle_docs(message):
 
 @bot.message_handler(content_types=['photo'])
 def handle_compressed_photo(message):
-    bot.reply_to(message, 
-                 "⚠️ <b>ОШИБКА OSINT:</b> Это сжатое фото.\n"
-                 "Telegram удалил GPS и EXIF данные.\n"
-                 "Отправь фото как <b>Файл (Document)</b>.",
-                 parse_mode='HTML')
+    bot.reply_to(message, "⚠️ Отправь фото как <b>Файл (Document)</b>, иначе метаданные теряются.", parse_mode='HTML')
 
 bot.polling(none_stop=True)
