@@ -3,7 +3,7 @@ from PIL import Image, ExifTags
 import os
 import time
 import hashlib # Для хеширования файлов (OSINT)
-import google.generativeai as genai # Библиотека Google AI
+import google.genai as genai # Библиотека Google AI
 
 # ================= КОНФИГУРАЦИЯ =================
 # Вставь сюда токен от BotFather
@@ -16,12 +16,23 @@ GOOGLE_API_KEY = 'ТУТ_ТВОЙ_API_KEY_GOOGLE'
 # Инициализация бота и AI
 bot = telebot.TeleBot(API_TOKEN)
 
-# Настройка Google AI, если ключ указан
-if GOOGLE_API_KEY != 'ТУТ_ТВОЙ_API_KEY_GOOGLE':
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+# --- ИСПРАВЛЕНИЕ ОШИБКИ configure() ---
+# Вместо genai.configure() используем genai.Client()
+model = None # Инициализируем модель как None по умолчанию
+client = None # Инициализируем клиент API
+
+if GOOGLE_API_KEY != 'оставить так нужно по преколу': 
+    try:
+        # Создаем экземпляр клиента, передавая ключ. Это заменяет genai.configure()
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        print("Клиент Gemini успешно инициализирован.")
+    except Exception as e:
+        # Теперь эта ошибка должна быть связана только с проблемами сети или ключа
+        print(f"Ошибка при инициализации клиента Gemini: {e}")
+        client = None # Оставляем None, если произошла ошибка
 else:
-    model = None
+    print("⚠️ GOOGLE_API_KEY не установлен. AI-функции будут недоступны.")
+
 
 def get_file_hashes(file_path):
     """Считает MD5 и SHA256 хеши файла (цифровые отпечатки)."""
@@ -77,8 +88,9 @@ def get_gps_details(exif):
 
 def get_ai_analysis(image_path):
     """Отправляет фото в Google Gemini для OSINT анализа."""
-    if not model:
-        return "⚠️ Google API Key не настроен. AI анализ пропущен."
+    # Используем клиент, а не модель, для вызова generate_content
+    if not client:
+        return "⚠️ Google API Key не настроен или клиент не инициализирован. AI анализ пропущен."
     
     try:
         with Image.open(image_path) as img:
@@ -89,7 +101,11 @@ def get_ai_analysis(image_path):
                 "3. Найди и перепиши любой видимый текст (вывески, номера авто, документы). "
                 "4. Опиши уникальные детали: оборудование, одежду людей, архитектуру."
             )
-            response = model.generate_content([prompt, img])
+            # ИСПРАВЛЕНИЕ: Вызываем через client.models
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=[prompt, img]
+            )
             return response.text
     except Exception as e:
         return f"Ошибка AI анализа: {e}"
