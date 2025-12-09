@@ -8,31 +8,53 @@ import requests
 import socket 
 
 # ================= КОНФИГУРАЦИЯ =================
-# Вставь сюда токен от BotFather
 API_TOKEN = 'ТУТ_ТВОЙ_ТОКЕН_TELEGRAM'
 
-# Вставь сюда API ключ от Google (https://aistudio.google.com/)
-GOOGLE_API_KEY = 'ТУТ_ТВОЙ_API_KEY_GOOGLE'
-
-# 1. Изменено на английский аналог, как вы просили
-CUSTOM_EXIF_MESSAGE = "AHA, want metadata?" 
+# !!! МНОЖЕСТВЕННЫЕ API КЛЮЧИ GEMINI !!!
+# Вставьте свои ключи в этот список. Бот будет переключаться между ними
+# при получении ошибки квоты (429).
+# Первый ключ будет использоваться по умолчанию.
+GOOGLE_API_KEYS = [
+    'ТУТ_ТВОЙ_API_KEY_GOOGLE', 
+    # 'ВТОРОЙ_ВАШ_КЛЮЧ', 
+    # 'ТРЕТИЙ_ВАШ_КЛЮЧ'
+]
 # ================================================
 
 # Инициализация бота
 bot = telebot.TeleBot(API_TOKEN)
 
-# Инициализация клиента Gemini
-client = None 
+# Глобальная переменная для отслеживания текущего ключа и счетчика
+current_api_key_index = 0
+global client # Глобальный клиент для переинициализации
+client = None
 
-if GOOGLE_API_KEY != '0':
-    try:
-        client = genai.Client(api_key=GOOGLE_API_KEY)
-        print("Клиент Gemini успешно инициализирован.")
-    except Exception as e:
-        print(f"Ошибка при инициализации клиента Gemini: {e}")
-        client = None 
-else:
-    print("⚠️ GOOGLE_API_KEY не установлен. AI-функции будут недоступны.")
+def initialize_gemini_client():
+    """Инициализирует клиента Gemini с текущим ключом."""
+    global client
+    if GOOGLE_API_KEYS:
+        key = GOOGLE_API_KEYS[current_api_key_index]
+        if key == '0':
+            print("⚠️ Используется ключ-заглушка. AI-функции будут недоступны.")
+            client = None
+            return False
+        
+        try:
+            client = genai.Client(api_key=key)
+            print(f"Клиент Gemini инициализирован с ключом №{current_api_key_index + 1}.")
+            return True
+        except Exception as e:
+            print(f"Ошибка при инициализации клиента Gemini с ключом №{current_api_key_index + 1}: {e}")
+            client = None
+            return False
+    else:
+        print("⚠️ Список GOOGLE_API_KEYS пуст. AI-функции будут недоступны.")
+        client = None
+        return False
+
+# Инициализируем клиент при старте
+initialize_gemini_client()
+
 
 # ================= ФУНКЦИИ ПРОВЕРКИ ИНТЕРНЕТА =================
 
@@ -82,30 +104,75 @@ def get_gps_details(exif):
     except Exception:
         return None
 
-def get_ai_analysis(image_path, metadata_text=None):
-    if not client:
-        return "⚠️ Google API Key не настроен или клиент не инициализирован. AI анализ пропущен."
+def switch_to_next_key(message_id):
+    """Переключает на следующий API ключ в списке."""
+    global current_api_key_index
     
-    try:
-        with Image.open(image_path) as img:
-            prompt = (
-                "Ты эксперт по OSINT. Проанализируй это изображение максимально подробно. "
-                "1. Опиши местоположение, время суток, время года. "
-                "2. Найди и перепиши любой видимый текст. "
-                "3. Опиши уникальные детали (архитектура, оборудование, одежда и т.д.). "
-                "4. Проверь наличие скрытых или кастомных метаданных, например, в поле UserComment или Comment."
-            )
+    # Пытаемся переключиться
+    if len(GOOGLE_API_KEYS) > 1:
+        current_api_key_index = (current_api_key_index + 1) % len(GOOGLE_API_KEYS)
+        
+        if GOOGLE_API_KEYS[current_api_key_index] == GOOGLE_API_KEYS[0]:
+            # Мы сделали полный цикл и вернулись к первому ключу (или использовали все)
+            bot.send_message(message_id, "❌ **Квота исчерпана на всех доступных ключах!** AI анализ временно недоступен. Повторите попытку позже.", parse_mode='HTML')
+            return False
             
-            if metadata_text:
-                prompt += f"\n\nВот извлеченные метаданные изображения:\n{metadata_text}\n\nПроанализируй их вместе с изображением."
+        initialize_gemini_client()
+        bot.send_message(message_id, f"🔑 **Квота исчерпана.** Автоматическое переключение на ключ №{current_api_key_index + 1}.", parse_mode='HTML')
+        return True
+    
+    # Если ключ всего один
+    bot.send_message(message_id, "❌ **Квота исчерпана!** (Используется только один ключ). AI анализ временно недоступен.", parse_mode='HTML')
+    return False
 
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[prompt, img]
-            )
-            return response.text
-    except Exception as e:
-        return f"Ошибка AI анализа: {e}"
+def get_ai_analysis(image_path, metadata_text=None, message_id=None):
+    global client
+    global current_api_key_index
+    
+    max_attempts = len(GOOGLE_API_KEYS)
+    
+    for attempt in range(max_attempts):
+        if not client:
+            # Если клиент не был инициализирован, пытаемся инициализировать
+            if not initialize_gemini_client():
+                return "⚠️ Google API Key не настроен или список пуст. AI анализ пропущен."
+        
+        try:
+            with Image.open(image_path) as img:
+                prompt = (
+                    "Ты эксперт по OSINT. Проанализируй это изображение максимально подробно. "
+                    "1. Опиши местоположение, время суток, время года. "
+                    "2. Найди и перепиши любой видимый текст. "
+                    "3. Опиши уникальные детали (архитектура, оборудование, одежда и т.д.). "
+                    "4. Проверь наличие скрытых или кастомных метаданных, например, в поле UserComment или Comment."
+                )
+                
+                if metadata_text:
+                    prompt += f"\n\nВот извлеченные метаданные изображения:\n{metadata_text}\n\nПроанализируй их вместе с изображением."
+
+                # Используем текущий глобальный клиент
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[prompt, img]
+                )
+                return response.text
+                
+        except Exception as e:
+            # Универсальная обработка ошибок для отлова квоты (429)
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                print(f"Ошибка квоты (429): {e}")
+                if switch_to_next_key(message_id):
+                    # Если переключение удачное, продолжаем цикл (пробуем новый ключ)
+                    continue
+                else:
+                    return "❌ AI анализ прерван. Исчерпана квота на всех ключах."
+            
+            # Если это не ошибка квоты, возвращаем описание ошибки
+            return f"Ошибка AI анализа: {e}"
+
+    return "❌ AI анализ прерван. Не удалось получить ответ после всех попыток."
+
 
 def clean_metadata(input_path, output_path, custom_message=None):
     exif_dict = {}
@@ -113,6 +180,7 @@ def clean_metadata(input_path, output_path, custom_message=None):
     exif_bytes = None
 
     if custom_message:
+        # 1. Изменено на английский аналог
         if output_path.lower().endswith(('.png')):
             metadata = PngImagePlugin.PngInfo()
             metadata.add_text("Comment", custom_message)
@@ -150,7 +218,7 @@ def clean_metadata(input_path, output_path, custom_message=None):
 
 
 def get_exif_data(image_path):
-    REPORT_TAGS = ['DateTimeOriginal', 'Make', 'Model', 'Artist', 'Software', 'UserComment','OffsetTime']
+    REPORT_TAGS = ['DateTimeOriginal', 'Make', 'Model', 'Artist', 'Software', 'UserComment']
     report = []
     
     md5, sha256 = get_file_hashes(image_path)
@@ -210,10 +278,10 @@ def get_exif_data(image_path):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, 
-                 "🕵️‍♂️ <b>OSINT Bot v2.4</b>\n\n"
+                 "🕵️‍♂️ <b>OSINT Bot v2.5</b>\n\n"
                  "Функции:\n"
                  "1. 📍 Извлечение GPS и EXIF\n"
-                 "2. 🤖 AI Анализ\n"
+                 "2. 🤖 AI Анализ (с автоматической сменой ключа при исчерпании квоты)\n"
                  "3. 🧼 **Очистка и СТЕЛС-МЕТА**\n\n"
                  "Отправь фото как <b>Файл (Document)</b>.",
                  parse_mode='HTML')
@@ -264,13 +332,14 @@ def handle_docs(message):
         # =========================================================
         clean_filename = f"clean_{src}"
         # Генерируем фото с новой мета-информацией "AHA, want metadata?"
-        clean_metadata(src, clean_filename, custom_message=CUSTOM_EXIF_MESSAGE) 
+        clean_metadata(src, clean_filename, custom_message="AHA, want metadata?") 
         files_to_cleanup.append(clean_filename)
 
         # =========================================================
         # ШАГ 2: AI АНАЛИЗ (Анализируем чистое фото) - ОТПРАВЛЯЕМ ВТОРЫМ
         # =========================================================
-        ai_result = get_ai_analysis(clean_filename, metadata_text=tech_report_text) 
+        # Передаем message.chat.id для отправки уведомления о смене ключа
+        ai_result = get_ai_analysis(clean_filename, metadata_text=tech_report_text, message_id=message.chat.id) 
         ai_filename = f"ai_analysis_{src}.txt"
         
         with open(ai_filename, "w", encoding="utf-8") as f:
@@ -284,7 +353,7 @@ def handle_docs(message):
         # ШАГ 3: ОТПРАВЛЯЕМ ЧИСТОЕ ФОТО - ТЕПЕРЬ ПОСЛЕДНИМ
         # =========================================================
         with open(clean_filename, "rb") as clean_file:
-            bot.send_document(message.chat.id, clean_file, caption=f"🧼 <b>Чистое фото + Стелс-Мета:</b>\n'{CUSTOM_EXIF_MESSAGE}'", parse_mode='HTML')
+            bot.send_document(message.chat.id, clean_file, caption=f"🧼 <b>Чистое фото + Стелс-Мета:</b>\n'AHA, want metadata?'", parse_mode='HTML')
 
 
     except Exception as e:
