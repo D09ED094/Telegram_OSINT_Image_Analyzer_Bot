@@ -31,7 +31,7 @@ pip3 --version
 Установите все необходимые Python-библиотеки, используя `pip`:
 
 ```bash
-pip install pyTelegramBotAPI Pillow google-generativeai
+pip install pyTelegramBotAPI Pillow google-genai
 ```
 
 ## Как настроить?
